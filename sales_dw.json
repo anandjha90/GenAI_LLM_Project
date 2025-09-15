@@ -1,0 +1,24 @@
+{
+  "database": "sales_dw",
+  "tables": {
+    "sales": {
+      "columns": {
+        "sale_id": {"type": "INT", "description": "Unique identifier for each sale"},
+        "product_id": {"type": "INT", "description": "Foreign key → products.product_id"},
+        "region": {"type": "VARCHAR", "description": "Sales region"},
+        "sale_date": {"type": "DATE", "description": "Date of transaction"},
+        "sales_amount": {"type": "DECIMAL", "description": "Revenue from transaction"},
+        "quantity": {"type": "INT", "description": "Number of units sold"}
+      }
+    },
+    "products": {
+      "columns": {
+        "product_id": {"type": "INT", "description": "Unique product ID"},
+        "product_name": {"type": "VARCHAR", "description": "Name of the product"},
+        "category": {"type": "VARCHAR", "description": "Product category"},
+        "subcategory": {"type": "VARCHAR", "description": "Subcategory"},
+        "brand": {"type": "VARCHAR", "description": "Product brand"}
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "database": "marketing_dw",
+  "tables": {
+    "campaigns": {
+      "columns": {
+        "campaign_id": {"type": "INT", "description": "Unique campaign ID"},
+        "channel": {"type": "VARCHAR", "description": "Marketing channel"},
+        "start_date": {"type": "DATE", "description": "Campaign start date"},
+        "end_date": {"type": "DATE", "description": "Campaign end date"},
+        "budget": {"type": "DECIMAL", "description": "Campaign budget"}
+      }
+    },
+    "impressions": {
+      "columns": {
+        "campaign_id": {"type": "INT", "description": "Foreign key → campaigns.campaign_id"},
+        "day": {"type": "DATE", "description": "Date of impressions"},
+        "impressions": {"type": "INT", "description": "Number of impressions shown"},
+        "clicks": {"type": "INT", "description": "Number of clicks received"}
+      }
+    }
+  }
+}
