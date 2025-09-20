@@ -1,0 +1,13 @@
+# Core Streamlit & UI
+streamlit
+
+# Data handling
+pandas
+numpy
+openpyxl
+
+# Visualization
+plotly
+
+# MySQL connector
+mysql-connector-python
