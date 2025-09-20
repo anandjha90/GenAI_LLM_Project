@@ -1,87 +1,72 @@
-import os, json, sys, getpass
+import os, json
 from datetime import datetime
 import pandas as pd
 import mysql.connector
+import streamlit as st
+import plotly.express as px
 from groq import Groq
-from colorama import Fore, Style, init
-from decimal import Decimal
 
-init(autoreset=True)
+DATA_DIR = r"C:\Users\PC\OneDrive\Desktop\sqlprojectwithGENAI\data"
 
 class GenAIMigrationPipeline:
-    def __init__(self):
-        self.groq_client = None
+    def __init__(self, mysql_config, groq_key, groq_model):
+        self.groq_client = Groq(api_key=groq_key) if groq_key else None
         self.config = {
-            'model': 'llama-3.3-70b-versatile',  # Default supported model
+            'model': groq_model or 'llama-3.3-70b-versatile',
             'temperature': 0.1,
             'max_tokens': 2000
         }
+        self.mysql_config = mysql_config
         self.mysql_conn = None
         self.results = {}
-        self.data_dir = "data"
+        self.data_dir = DATA_DIR
 
-    # --- STEP 0: Check CSV files ---
     def check_csv_files(self):
-        required_files = ["CUSTOMERS.csv","INVENTORY.csv","SALES.csv"]
-        missing = [f for f in required_files if not os.path.exists(os.path.join(self.data_dir,f))]
+        required = ["CUSTOMERS.csv", "INVENTORY.csv", "SALES.csv"]
+        missing = [f for f in required if not os.path.exists(os.path.join(self.data_dir, f))]
         if missing:
-            print(f"{Fore.RED}❌ Missing CSV files in '{self.data_dir}': {missing}{Style.RESET_ALL}")
-            sys.exit(1)
+            st.error(f"❌ Missing CSV files: {missing}")
+            st.stop()
 
-    # --- STEP 1: Connect to MySQL ---
     def connect_mysql(self):
-        print(f"\n{Fore.YELLOW}MySQL Connection Setup{Style.RESET_ALL}")
-        host = input("Host (default: localhost): ") or "localhost"
-        user = input("User (default: root): ") or "root"
-        pwd = getpass.getpass("Password: ")
-        db = input("Database to create/use (default: retail_dw): ") or "retail_dw"
-
         try:
-            self.mysql_conn = mysql.connector.connect(host=host, user=user, password=pwd)
+            self.mysql_conn = mysql.connector.connect(
+                host=self.mysql_config["host"],
+                user=self.mysql_config["user"],
+                password=self.mysql_config["password"]
+            )
             cur = self.mysql_conn.cursor()
-            cur.execute(f"CREATE DATABASE IF NOT EXISTS {db}")
-            cur.execute(f"USE {db}")
-            print(f"{Fore.GREEN}✓ Connected to MySQL and using database `{db}`{Style.RESET_ALL}")
+            cur.execute(f"CREATE DATABASE IF NOT EXISTS {self.mysql_config['database']}")
+            cur.execute(f"USE {self.mysql_config['database']}")
+            st.success(f"✓ Connected to MySQL `{self.mysql_config['database']}`")
         except mysql.connector.Error as e:
-            print(f"{Fore.RED}❌ MySQL connection failed: {e}{Style.RESET_ALL}")
-            sys.exit(1)
+            st.error(f"MySQL connection failed: {e}")
+            st.stop()
 
-    # --- STEP 2: Initialize Groq ---
-    def init_groq(self):
-        print(f"\n{Fore.YELLOW}Groq API Setup{Style.RESET_ALL}")
-        key = getpass.getpass("Groq API key: ")
-        self.groq_client = Groq(api_key=key)
-        model_name = input(f"Enter Groq model to use (default: {self.config['model']}): ") or self.config['model']
-        self.config['model'] = model_name
-
-    # --- STEP 3: Prompt LLM ---
     def prompt_llm(self, system_prompt, user_prompt):
+        if not self.groq_client:
+            return ""
         try:
             resp = self.groq_client.chat.completions.create(
                 model=self.config['model'],
-                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
+                messages=[{"role": "system", "content": system_prompt},
+                          {"role": "user", "content": user_prompt}],
                 temperature=self.config['temperature'],
                 max_tokens=self.config['max_tokens']
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
-            print(f"{Fore.RED}❌ Groq API error: {e}{Style.RESET_ALL}")
-            sys.exit(1)
+            st.error(f"Groq API error: {e}")
+            return ""
 
-    # --- STEP 4: Drop tables if exist ---
     def drop_tables_if_exist(self):
         cur = self.mysql_conn.cursor()
-        for table in ["SALES","INVENTORY","CUSTOMERS"]:
-            try:
-                cur.execute(f"DROP TABLE IF EXISTS {table}")
-                print(f"{Fore.YELLOW}✓ Dropped table if existed: {table}{Style.RESET_ALL}")
-            except:
-                pass
+        for table in ["SALES", "INVENTORY", "CUSTOMERS"]:
+            cur.execute(f"DROP TABLE IF EXISTS {table}")
         self.mysql_conn.commit()
+        st.info("Dropped existing tables (if any)")
 
-    # --- STEP 5: Design Schema ---
     def design_schema(self):
-        print(f"\n{Fore.YELLOW}Step 1: Designing Schema with GenAI{Style.RESET_ALL}")
         schema_text = ""
         for csvfile in ["CUSTOMERS.csv","INVENTORY.csv","SALES.csv"]:
             path = os.path.join(self.data_dir, csvfile)
@@ -89,144 +74,211 @@ class GenAIMigrationPipeline:
             schema_text += f"\nCSV: {csvfile}\n"
             schema_text += "\n".join([f"- {c}: {str(df[c].dtype)}" for c in df.columns])+"\n"
 
-        sys_prompt = "You are an expert database architect. Generate MySQL CREATE TABLE scripts based on given CSV columns and datatypes. Use appropriate PK/FK constraints. For phone numbers, use BIGINT or VARCHAR to avoid out-of-range errors."
-        user_prompt = f"Here are the CSV structures:\n{schema_text}\nReturn only SQL without markdown formatting."
-        sql = self.prompt_llm(sys_prompt, user_prompt)
+        sys_prompt = "Generate MySQL CREATE TABLE scripts with PK/FK. Return only SQL."
+        sql = self.prompt_llm(sys_prompt, schema_text)
         self.results['schema_sql'] = sql
 
         cur = self.mysql_conn.cursor()
-        tables = sql.split(";")
-        # Create parent tables first
-        for stmt in tables:
+        for stmt in sql.split(";"):
             stmt_clean = stmt.replace("```sql","").replace("```","").strip()
-            if not stmt_clean or "SALES" in stmt_clean: continue
-            try:
-                cur.execute(stmt_clean)
-                print(f"{Fore.GREEN}✓ Executed: {stmt_clean.splitlines()[0]}{Style.RESET_ALL}")
-            except Exception as e:
-                print(f"{Fore.RED}Error executing SQL: {stmt_clean}\n{e}{Style.RESET_ALL}")
-        # Child tables
-        for stmt in tables:
-            stmt_clean = stmt.replace("```sql","").replace("```","").strip()
-            if not stmt_clean or "SALES" not in stmt_clean: continue
-            try:
-                cur.execute(stmt_clean)
-                print(f"{Fore.GREEN}✓ Executed: {stmt_clean.splitlines()[0]}{Style.RESET_ALL}")
-            except Exception as e:
-                print(f"{Fore.RED}Error executing SQL: {stmt_clean}\n{e}{Style.RESET_ALL}")
+            if stmt_clean:
+                try:
+                    cur.execute(stmt_clean)
+                except Exception as e:
+                    st.error(f"Error executing SQL: {stmt_clean}\n{e}")
         self.mysql_conn.commit()
-        print(f"{Fore.GREEN}✓ Schema creation complete{Style.RESET_ALL}")
+        st.success("Schema created")
 
-    # --- STEP 6: Import CSV data safely ---
     def import_data(self):
-        print(f"\n{Fore.YELLOW}Step 2: Importing CSV Data{Style.RESET_ALL}")
         cur = self.mysql_conn.cursor()
         for fname in ["CUSTOMERS.csv","INVENTORY.csv","SALES.csv"]:
             path = os.path.join(self.data_dir, fname)
             table = fname.split(".")[0]
             df = pd.read_csv(path)
             if table=="CUSTOMERS" and "phone_number" in df.columns:
-                df["phone_number"] = df["phone_number"].apply(str)
+                df["phone_number"] = df["phone_number"].astype(str)
             cols = ",".join(df.columns)
-            vals_placeholder = ",".join(["%s"]*len(df.columns))
+            vals = ",".join(["%s"]*len(df.columns))
             data = [tuple(r) for r in df.to_numpy()]
             try:
-                cur.executemany(f"INSERT IGNORE INTO {table} ({cols}) VALUES ({vals_placeholder})", data)
+                cur.executemany(f"INSERT IGNORE INTO {table} ({cols}) VALUES ({vals})", data)
                 self.mysql_conn.commit()
-                print(f"{Fore.GREEN}✓ Data loaded into {table}{Style.RESET_ALL}")
+                st.success(f"Loaded {len(data)} rows into {table}")
             except Exception as e:
-                print(f"{Fore.RED}❌ Failed to load data into {table}: {e}{Style.RESET_ALL}")
+                st.error(f"Failed to load {table}: {e}")
 
-    # --- STEP 7: Generate Validation SQL ---
     def validate_data(self):
-        print(f"\n{Fore.YELLOW}Step 3: Generating Validation Queries{Style.RESET_ALL}")
-        sys_prompt = """You are a data QA expert. Write SQL queries to:
+        sys_prompt = """Write SQL to:
 1. Count rows in CUSTOMERS, INVENTORY, SALES
 2. Verify every SALES.customer_id exists in CUSTOMERS
 3. Verify every SALES.product_id exists in INVENTORY
 4. Total of SALES.total_amount"""
-        sql = self.prompt_llm(sys_prompt,"Return only SQL without markdown formatting")
-        self.results['validation_sql'] = sql
-        print(sql)
+        sql = self.prompt_llm(sys_prompt, "Return only SQL")
+        self.results['validation_sql'] = sql or ""
 
-    # --- STEP 8: Run Validation ---
-    def run_validation(self):
-        print(f"\n{Fore.YELLOW}Step 3B: Running Validation Queries{Style.RESET_ALL}")
         cur = self.mysql_conn.cursor()
-        validation_out=[]
+        results=[]
         for stmt in self.results['validation_sql'].split(";"):
             stmt_clean=stmt.replace("```sql","").replace("```","").strip()
-            if not stmt_clean: continue
-            try:
-                cur.execute(stmt_clean)
-                res=cur.fetchall()
-                validation_out.append({"query":stmt_clean,"result":res})
-            except Exception as e:
-                validation_out.append({"query":stmt_clean,"error":str(e)})
-        self.results['validation_results']=validation_out
-        print(f"{Fore.GREEN}✓ Validation results captured{Style.RESET_ALL}")
+            if stmt_clean:
+                try:
+                    cur.execute(stmt_clean)
+                    results.append({"query":stmt_clean,"result":cur.fetchall()})
+                except Exception as e:
+                    results.append({"query":stmt_clean,"error":str(e)})
+        self.results['validation_results']=results
+        st.subheader("Validation Results")
+        st.json(results)
 
-    # --- STEP 9: Translate PL/SQL ---
     def translate_plsql(self):
-        print(f"\n{Fore.YELLOW}Step 4: Translating Oracle PL/SQL{Style.RESET_ALL}")
         path=os.path.join(self.data_dir,"oracle_plsql_procedures.sql")
         if not os.path.exists(path):
-            print(f"{Fore.RED}❌ PL/SQL file not found: {path}{Style.RESET_ALL}")
+            st.info("No PL/SQL file found")
             return
-        with open(path) as f:
-            plsql=f.read()
-        sys_prompt="You are an SQL expert. Convert Oracle PL/SQL procedures/functions into equivalent MySQL stored procedures/functions."
+        with open(path) as f: plsql=f.read()
+        sys_prompt="Convert Oracle PL/SQL to MySQL stored procedures."
         mysql_code=self.prompt_llm(sys_prompt,plsql)
         self.results['translated_sql']=mysql_code
-        print(mysql_code)
+        st.subheader("Translated PL/SQL")
+        st.code(mysql_code, language="sql")
 
-    # --- STEP 10: Generate BI Queries ---
     def generate_bi(self):
-        print(f"\n{Fore.YELLOW}Step 5: Generating BI KPI Queries{Style.RESET_ALL}")
-        sys_prompt="Write MySQL SQL queries for KPIs: monthly sales trend, top 5 customers by revenue, low stock products (<100 qty)."
-        sql=self.prompt_llm(sys_prompt,"Return only SQL without markdown formatting")
+        sys_prompt="Write MySQL queries: monthly sales trend, top 5 customers, low stock (<100)."
+        sql=self.prompt_llm(sys_prompt,"Return only SQL")
         self.results['bi_sql']=sql
-        print(sql)
+        st.subheader("Generated BI Queries")
+        st.code(sql, language="sql")
 
-    # --- STEP 11: Export Markdown Report ---
     def export_report(self):
-        print(f"\n{Fore.YELLOW}Step 6: Exporting Migration Report{Style.RESET_ALL}")
-        md = f"# GenAI-Assisted Data Migration Report\n\n"
-        md += f"**Run Timestamp:** {datetime.now()}\n\n"
-        for k, v in self.results.items():
-            # Agar string hai → SQL ya text
-            if isinstance(v, str):
-                md += f"## {k}\n\n```sql\n{v}\n```\n\n"
+        md=f"# Migration Report\n\nRun: {datetime.now()}\n\n"
+        for k,v in self.results.items():
+            if isinstance(v,str):
+                md+=f"## {k}\n\n```sql\n{v}\n```\n\n"
             else:
-                # Agar JSON me Decimal hai → convert to float
-                def default_converter(o):
-                    if isinstance(o, Decimal):
-                        return float(o)
-                    return str(o)  # fallback for any other non-serializable type
+                md+=f"## {k}\n\n{json.dumps(v,indent=2,default=str)}\n\n"
+        os.makedirs("output",exist_ok=True)
+        outpath=f"output/migration_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+        with open(outpath,"w") as f: f.write(md)
+        st.success(f"Report saved: {outpath}")
 
-                md += f"## {k}\n\n{json.dumps(v, indent=2, default=default_converter)}\n\n"
+# ---------------- STREAMLIT APP ----------------
+st.set_page_config(page_title="GenAI Migration Dashboard", layout="wide")
+st.title("🧠 GenAI-Assisted Migration Dashboard")
 
-        outpath = f"output/migration_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
-        os.makedirs("output", exist_ok=True)
-        with open(outpath, "w") as f:
-            f.write(md)
-        print(f"{Fore.GREEN}✓ Report saved to {outpath}{Style.RESET_ALL}")
+tab1, tab2 = st.tabs(["⚙️ Migration Pipeline", "📊 BI Dashboard"])
 
-    # --- STEP 12: Run Pipeline ---
-    def run(self):
-        self.check_csv_files()
-        self.connect_mysql()
-        self.init_groq()
-        self.drop_tables_if_exist()
-        self.design_schema()
-        self.import_data()
-        self.validate_data()
-        self.run_validation()
-        self.translate_plsql()
-        self.generate_bi()
-        self.export_report()
-        print(f"\n{Fore.GREEN}✅ Migration Pipeline Complete{Style.RESET_ALL}")
+# ----- TAB 1: Pipeline -----
+with tab1:
+    st.sidebar.header("Database Settings")
+    host=st.sidebar.text_input("MySQL Host","localhost")
+    user=st.sidebar.text_input("MySQL User","root")
+    password=st.sidebar.text_input("Password", type="password")
+    database=st.sidebar.text_input("Database","retail_dw")
 
-if __name__=="__main__":
-    GenAIMigrationPipeline().run()
+    st.sidebar.header("Groq Settings")
+    groq_key=st.sidebar.text_input("Groq API Key", type="password")
+    groq_model=st.sidebar.text_input("Groq Model","llama-3.3-70b-versatile")
 
+    if st.button("🚀 Run Full Migration"):
+        pipe=GenAIMigrationPipeline(
+            {"host":host,"user":user,"password":password,"database":database},
+            groq_key, groq_model
+        )
+        pipe.check_csv_files()
+        pipe.connect_mysql()
+        pipe.drop_tables_if_exist()
+        pipe.design_schema()
+        pipe.import_data()
+        pipe.validate_data()
+        pipe.translate_plsql()
+        pipe.generate_bi()
+        pipe.export_report()
+
+# ----- TAB 2: Dashboard -----
+with tab2:
+    # Paths
+    customers_path = os.path.join(DATA_DIR,"CUSTOMERS.csv")
+    inventory_path = os.path.join(DATA_DIR,"INVENTORY.csv")
+    sales_path = os.path.join(DATA_DIR,"SALES.csv")
+
+    if all(os.path.exists(p) for p in [customers_path, inventory_path, sales_path]):
+        customers = pd.read_csv(customers_path)
+        inventory = pd.read_csv(inventory_path)
+        sales = pd.read_csv(sales_path)
+
+        # Clean & convert types
+        if "sale_date" in sales.columns:
+            sales["sale_date"] = pd.to_datetime(sales["sale_date"], errors="coerce")
+        if "join_date" in customers.columns:
+            customers["join_date"] = pd.to_datetime(customers["join_date"], errors="coerce")
+        for col in ["total_amount","quantity"]:
+            if col in sales.columns:
+                sales[col] = pd.to_numeric(sales[col], errors="coerce").fillna(0)
+        for col in ["price_per_unit","quantity_in_stock"]:
+            if col in inventory.columns:
+                inventory[col] = pd.to_numeric(inventory[col], errors="coerce").fillna(0)
+
+        # --- KPIs ---
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("💰 Total Sales", f"{sales['total_amount'].sum():,.2f}")
+        c2.metric("👥 Customers", str(customers.shape[0]))
+        c3.metric("📦 Products", str(inventory.shape[0]))
+        c4.metric("🛒 Transactions", str(sales.shape[0]))
+
+        st.markdown("---")
+
+        # --- Monthly Sales Trend ---
+        st.subheader("📈 Monthly Sales Trend")
+        df_month = sales.dropna(subset=["sale_date"]).copy()
+        if not df_month.empty:
+            df_month["month"] = df_month["sale_date"].dt.to_period("M").dt.to_timestamp()
+            monthly_sales = df_month.groupby("month")["total_amount"].sum().reset_index()
+            fig_sales = px.line(
+                monthly_sales, x="month", y="total_amount",
+                title="Monthly Sales Trend",
+                markers=True,
+                labels={"month":"Month","total_amount":"Sales Amount"}
+            )
+            fig_sales.update_layout(yaxis_tickprefix="$")
+            st.plotly_chart(fig_sales, use_container_width=True)
+
+        # --- Top Customers ---
+        st.subheader("👑 Top 10 Customers")
+        top_customers = sales.groupby("customer_id")["total_amount"].sum().reset_index()
+        top_customers = top_customers.merge(customers, on="customer_id", how="left")
+        top_customers = top_customers.sort_values("total_amount", ascending=False).head(10)
+        fig_customers = px.bar(
+            top_customers, x="customer_name", y="total_amount",
+            title="Top 10 Customers by Sales",
+            labels={"customer_name":"Customer","total_amount":"Sales Amount"},
+            text="total_amount"
+        )
+        fig_customers.update_traces(texttemplate='$%{text:.2f}', textposition='outside')
+        st.plotly_chart(fig_customers, use_container_width=True)
+
+        # --- Top Products ---
+        st.subheader("🏆 Top 10 Products")
+        top_products = sales.groupby("product_id")["total_amount"].sum().reset_index()
+        top_products = top_products.merge(inventory, on="product_id", how="left")
+        top_products = top_products.sort_values("total_amount", ascending=False).head(10)
+        fig_products = px.bar(
+            top_products, x="product_name", y="total_amount",
+            title="Top 10 Products by Sales",
+            labels={"product_name":"Product","total_amount":"Sales Amount"},
+            text="total_amount"
+        )
+        fig_products.update_traces(texttemplate='$%{text:.2f}', textposition='outside')
+        st.plotly_chart(fig_products, use_container_width=True)
+
+        # --- Low Stock Table ---
+        st.subheader("⚠️ Low Stock Products (<100 units)")
+        low_stock = inventory[inventory["quantity_in_stock"] < 100]
+        st.dataframe(low_stock, use_container_width=True)
+        st.download_button(
+            "Download Low Stock CSV",
+            low_stock.to_csv(index=False).encode("utf-8"),
+            file_name="low_stock.csv"
+        )
+
+    else:
+        st.warning("⚠️ CSV files not found in data folder.")
